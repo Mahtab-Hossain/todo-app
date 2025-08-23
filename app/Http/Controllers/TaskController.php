@@ -2,20 +2,39 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Task;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cookie;
-use Illuminate\Support\Facades\Session;
-use Illuminate\Validation\ValidationException;
+use Yajra\DataTables\DataTables;
 
 class TaskController extends Controller
 {
     public function index()
     {
-        // Get tasks from session or empty array
-        $tasks = Session::get('tasks', []);
-        $theme = Cookie::get('theme', 'light'); // Default to light
+        // ensure $tasks is always defined and returns user's tasks when authenticated
+        if (auth()->check()) {
+            $tasks = Task::where('user_id', auth()->id())->latest()->get();
+        } else {
+            $tasks = Task::latest()->get();
+        }
 
-        return view('tasks.index', compact('tasks', 'theme'));
+        return view('tasks.index', compact('tasks'));
+    }
+
+    public function data()
+    {
+        $tasks = Task::where('user_id', auth()->id())->select('id', 'title', 'description', 'status');
+        return DataTables::of($tasks)
+            ->addColumn('action', function ($task) {
+                return '<a href="' . route('tasks.edit', $task->id) . '" class="px-2 py-1 bg-yellow-500 text-white rounded">Edit</a>
+                        <form action="' . route('tasks.destroy', $task->id) . '" method="POST" class="inline-block ml-2">
+                            @csrf
+                            @method("DELETE")
+                            <button type="submit" class="px-2 py-1 bg-red-500 text-white rounded" onclick="return confirm(\'Delete?\')">Delete</button>
+                        </form>';
+            })
+            ->rawColumns(['action'])
+            ->make(true);
     }
 
     public function create()
@@ -26,39 +45,28 @@ class TaskController extends Controller
 
     public function store(Request $request)
     {
-        // Validate input
-        $validated = $request->validate([
-            'title' => 'required|min:3',
-            'description' => 'nullable|max:255',
+        $request->validate([
+            'title' => 'required|string|max:255',
+            'description' => 'nullable|string',
+            'status' => 'nullable|string',
         ]);
 
-        // Get current tasks
-        $tasks = Session::get('tasks', []);
+        // create task and attach to authenticated user (if app uses user ownership)
+        Task::create([
+            'title' => $request->title,
+            'description' => $request->description,
+            'status' => $request->status ?? 'pending',
+            'user_id' => auth()->id(), // important: ensure user_id is saved
+        ]);
 
-        // Generate ID (simple increment)
-        $id = count($tasks) + 1;
-
-        // Add new task
-        $tasks[] = [
-            'id' => $id,
-            'title' => $validated['title'],
-            'description' => $validated['description'] ?? '',
-            'status' => 'pending', // Default status
-        ];
-
-        // Save back to session
-        Session::put('tasks', $tasks);
-
-        return redirect()->route('tasks.index')->with('success', 'Task added!');
+        return redirect()->route('tasks.index')->with('success', 'Task added');
     }
 
     public function edit($id)
     {
-        $tasks = Session::get('tasks', []);
-        $task = collect($tasks)->firstWhere('id', $id);
-
-        if (!$task) {
-            return redirect()->route('tasks.index')->with('error', 'Task not found');
+        $task = Task::findOrFail($id);
+        if ($task->user_id !== auth()->id()) {
+            abort(403);
         }
 
         $theme = Cookie::get('theme', 'light');
@@ -67,48 +75,30 @@ class TaskController extends Controller
 
     public function update(Request $request, $id)
     {
-        // Validate
+        $task = Task::findOrFail($id);
+        if ($task->user_id !== auth()->id()) {
+            abort(403);
+        }
+
         $validated = $request->validate([
             'title' => 'required|min:3',
             'description' => 'nullable|max:255',
             'status' => 'required|in:pending,completed',
         ]);
 
-        // Get tasks
-        $tasks = Session::get('tasks', []);
-
-        // Find and update
-        foreach ($tasks as &$task) {
-            if ($task['id'] == $id) {
-                $task['title'] = $validated['title'];
-                $task['description'] = $validated['description'] ?? '';
-                $task['status'] = $validated['status'];
-                break;
-            }
-        }
-
-        // Save back
-        Session::put('tasks', $tasks);
+        $task->update($validated);
 
         return redirect()->route('tasks.index')->with('success', 'Task updated!');
     }
 
     public function destroy($id)
     {
-        $tasks = Session::get('tasks', []);
-
-        // Filter out the task
-        $tasks = array_filter($tasks, fn($task) => $task['id'] != $id);
-
-        // Re-index array
-        $tasks = array_values($tasks);
-
-        // Update IDs if needed (optional, but keeps IDs sequential)
-        foreach ($tasks as $key => &$task) {
-            $task['id'] = $key + 1;
+        $task = Task::findOrFail($id);
+        if ($task->user_id !== auth()->id()) {
+            abort(403);
         }
 
-        Session::put('tasks', $tasks);
+        $task->delete();
 
         return redirect()->route('tasks.index')->with('success', 'Task deleted!');
     }
@@ -118,7 +108,6 @@ class TaskController extends Controller
         $currentTheme = Cookie::get('theme', 'light');
         $newTheme = $currentTheme === 'light' ? 'dark' : 'light';
 
-        // Set cookie for 1 day
         return redirect()->back()->withCookie(cookie('theme', $newTheme, 1440));
     }
 }
